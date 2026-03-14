@@ -1,0 +1,4 @@
+interface:
+  display_name: "Substack Editorial Pipeline"
+  short_description: "Plan, draft, review, and publish rigorous Substack essays"
+  default_prompt: "Use $substack to plan, draft, fact-check, and package a rigorous Chinese political analysis newsletter essay."

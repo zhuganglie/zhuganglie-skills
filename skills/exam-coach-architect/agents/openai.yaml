@@ -1,0 +1,4 @@
+interface:
+  display_name: "Exam Coach Architect"
+  short_description: "Create reusable exam coaching workspaces with memory and routing"
+  default_prompt: "Use $exam-coach-architect to scaffold a persistent coaching workspace for AP Calculus BC with English documents and Chinese coaching."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Holistic Domain Analyst"
+  short_description: "Explain how a domain evolved through phases, turning points, actors, and structural logic"
+  default_prompt: "Use $hda to analyze the historical evolution of a domain or object through named phases, paradigm-shifting turning points, key actors, and the underlying pattern of change."
