@@ -1,0 +1,4 @@
+interface:
+  display_name: "Political Science Book Review"
+  short_description: "Deep review of political science academic books"
+  default_prompt: "Use $book-review to produce a critical review of this political science monograph."

@@ -1,14 +1,14 @@
 # Validator Agent Prompt Template
 
-你是连环画分镜脚本质量检查专家。请验证以下生成结果是否符合规范。
+你是连环画分镜脚本质量检查专家。请验证以下结果是否符合规范，并只输出 JSON。
 
----
+## 帧数要求
 
-## 角色卡（用于一致性检查）
+{{FRAME_COUNT_RULE}}
+
+## 角色卡
 
 {{CHARACTERS_JSON}}
-
----
 
 ## 待验证的帧数据
 
@@ -16,144 +16,65 @@
 
 ---
 
-## 验证规则
+## ERROR 级别
 
-### ERROR级别（必须修复）
+出现以下问题时必须报 `ERROR`：
 
-| 检查项 | 规则 |
-|-------|------|
-| 帧数范围 | 8-16帧 |
-| 角色一致性 | `characters[].appearance` 必须与角色卡**完全一致** |
-| 提示词结构 | `image_prompt` 必须包含全部6个部分：[1-场景] [2-人物] [3-构图] [4-旁白] [5-对话] [6-风格] |
-| 风格标签 | 必须包含「中国传统连环画」「黑白线描」 |
-| JSON有效性 | 所有字段必须存在且类型正确 |
+- 帧数不符合上面的帧数要求
+- 缺少必需字段或字段类型错误
+- `characters[].appearance` 与角色卡不完全一致
+- `dialogue` 不是对象数组，或对象缺少 `speaker` / `text`
+- `image_prompt` 缺少 `[1-场景]` 到 `[6-风格]` 中任一部分
+- `image_prompt` 缺少 `中国传统连环画` 或 `黑白线描`
 
-### WARNING级别（建议修复）
+## WARNING 级别
 
-| 检查项 | 规则 |
-|-------|------|
-| 旁白字数 | 50-100字（允许±5字容差） |
-| 对话字数 | 单气泡≤30字 |
-| 镜头多样性 | 至少3种不同镜头类型 |
-| 情节完整性 | 必须有开场、高潮、结局标记 |
+出现以下问题时报 `WARNING`：
 
----
-
-## 验证任务
-
-逐帧检查以下内容：
-
-1. **旁白字数**：计算每帧narration的字符数
-2. **对话字数**：检查每个dialogue条目的text长度
-3. **角色一致性**：比对characters[].appearance与角色卡
-4. **提示词结构**：检查image_prompt是否包含6个部分标记
-5. **风格标签**：搜索关键词
-6. **镜头统计**：统计shot_type分布
+- `narration` 明显不在 50-100 字范围内
+- 单个 `dialogue[].text` 超过 30 字
+- 镜头类型少于 3 种
+- 缺少 `开场`、`高潮`、`结局` 中任一关键标记
 
 ---
 
 ## 输出格式
 
-**严格JSON格式**：
+只输出 JSON：
 
 ```json
 {
-  "is_valid": true/false,
+  "is_valid": true,
   "total_frames": 12,
   "error_count": 0,
-  "warning_count": 2,
+  "warning_count": 1,
   "shot_distribution": {
     "全景": 2,
     "中景": 6,
-    "特写": 3,
-    "过肩": 1
+    "特写": 4
   },
-  "plot_markers_found": ["开场", "冲突引入", "发展", "转折", "高潮", "结局"],
+  "plot_markers_found": ["开场", "发展", "高潮", "结局"],
   "issues": [
     {
       "frame_number": 5,
       "field": "narration",
       "level": "WARNING",
-      "current_value": "...(102字)",
-      "expected": "50-100字",
-      "message": "旁白字数102字，超过100字上限",
-      "suggestion": "删除次要描述，精简到100字以内"
-    },
-    {
-      "frame_number": 8,
-      "field": "characters[0].appearance",
-      "level": "ERROR",
-      "current_value": "老年男子，穿便装",
-      "expected": "六旬退休老者，身形微胖，穿着朴素的居家便装...",
-      "message": "角色外观与角色卡不一致",
-      "suggestion": "完整复制角色卡中的外观描述"
+      "current_value": "102 字",
+      "expected": "50-100 字",
+      "message": "旁白偏长",
+      "suggestion": "删去次要细节"
     }
   ],
-  "frames_to_retry": [8],
-  "summary": "共12帧，0个错误，2个警告。帧8需要重新生成（角色不一致）。"
+  "frames_to_retry": [],
+  "summary": "共 12 帧，0 个错误，1 个警告。"
 }
 ```
 
----
+规则补充：
 
-## 验证逻辑
+1. `frames_to_retry` 只列出存在 `ERROR` 的帧号。
+2. 统计 `shot_distribution` 时使用 `shot_type`。
+3. 若某个 `ERROR` 不对应单一帧，例如总帧数错误，可在 `issues` 中写 `frame_number: null`。
+4. 如果没有问题，`issues` 仍返回空数组。
 
-```python
-def validate_frame(frame, characters):
-    issues = []
-    
-    # 1. 旁白字数
-    narr_len = len(frame["narration"])
-    if narr_len < 45 or narr_len > 105:
-        issues.append({
-            "field": "narration",
-            "level": "ERROR" if (narr_len < 30 or narr_len > 120) else "WARNING",
-            "message": f"旁白{narr_len}字，应为50-100字"
-        })
-    
-    # 2. 对话字数
-    for i, d in enumerate(frame.get("dialogue", [])):
-        if len(d["text"]) > 30:
-            issues.append({
-                "field": f"dialogue[{i}].text",
-                "level": "WARNING",
-                "message": f"对话{len(d['text'])}字，应≤30字"
-            })
-    
-    # 3. 角色一致性
-    for c in frame.get("characters", []):
-        expected = characters.get(c["name"], "")
-        if expected and c["appearance"] != expected:
-            # 检查是否包含关键信息
-            if not (expected[:20] in c["appearance"]):
-                issues.append({
-                    "field": "characters[].appearance",
-                    "level": "ERROR",
-                    "message": "角色外观与角色卡不一致"
-                })
-    
-    # 4. 提示词结构
-    prompt = frame.get("image_prompt", "")
-    required_parts = ["[1-场景]", "[2-人物]", "[3-构图]", "[4-旁白]", "[5-对话]", "[6-风格]"]
-    missing = [p for p in required_parts if p not in prompt]
-    if missing:
-        issues.append({
-            "field": "image_prompt",
-            "level": "ERROR",
-            "message": f"缺少部分: {missing}"
-        })
-    
-    # 5. 风格标签
-    if "中国传统连环画" not in prompt or "黑白线描" not in prompt:
-        issues.append({
-            "field": "image_prompt",
-            "level": "ERROR",
-            "message": "缺少风格标签"
-        })
-    
-    return issues
-```
-
----
-
-**现在开始验证，只输出JSON：**
+现在开始验证，只输出 JSON。

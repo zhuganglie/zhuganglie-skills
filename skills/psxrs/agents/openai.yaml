@@ -1,0 +1,4 @@
+interface:
+  display_name: "系列信息图拆解"
+  short_description: "把文章、课程或笔记拆成系列信息图与图像提示词输出方案"
+  default_prompt: "Use $psxrs to turn my notes or article into a platform-ready infographic series with card copy and image prompts."

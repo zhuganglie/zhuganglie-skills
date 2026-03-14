@@ -1,353 +1,301 @@
 ---
 name: xrs
-description: 将小说转换成中国传统连环画风格的分镜脚本和图片生成提示词
+description: 将中文或翻译小说、短篇故事、章节片段转换成中国传统连环画风格的分镜脚本、角色卡和图片生成提示词。用于把叙事文本拆成连贯画面、统一角色外观、批量生成 image prompt、验证结果质量，并对问题帧做增量重试；也适用于长篇分段处理和修复已有分镜脚本。
 ---
 
-# 连环画分镜脚本生成系统 (Enhanced Orchestrator)
+# 连环画分镜脚本系统
 
-将短篇/中篇小说转换为中国传统连环画分镜脚本，支持：
-- **长篇分段处理** - 自动分割>8000字小说
-- **并行帧生成** - 批量同时生成多帧
-- **质量验证** - 独立Agent检查输出
-- **增量重试** - 问题帧单独重新生成
+把用户提供的叙事文本转换成结构化 JSON 分镜，再按需渲染成 Markdown。
 
----
+按需读取这些模板，不要一次性全读：
 
-## 架构概览
+- `prompts/analyzer.md`：先抽角色卡和分帧方案
+- `prompts/generator.md`：单次生成全部帧，适合短文本
+- `prompts/batch_generator.md`：分批并行生成帧，适合长文本或高质量模式
+- `prompts/validator.md`：检查帧数、字段、角色一致性和提示词结构
+- `prompts/retry_generator.md`：只修复问题帧
 
-```
-Orchestrator
-    │
-    ├─→ [1] Chunker (长篇分段)
-    │
-    ├─→ [2] Analyzer Agent (分析)
-    │
-    ├─→ [3] Batch Generators (并行生成)
-    │       ├── Batch 1: 帧1-4
-    │       ├── Batch 2: 帧5-8
-    │       └── Batch 3: 帧9-12...
-    │
-    ├─→ [4] Validator Agent (验证)
-    │
-    ├─→ [5] Retry Loop (重试问题帧)
-    │
-    └─→ [6] Output (聚合输出)
-```
+## 核心规则
 
----
+1. 默认使用简体中文输出，除非用户明确要求其他语言。
+2. 用户工件写入任务工作目录，不要写回本 skill 目录。
+3. 所有模板一律使用字面量占位符替换，例如 `template.replace("{{NOVEL_TEXT}}", novel_text)`。不要使用 `.format()`。
+4. 一旦角色卡确定，后续每帧都必须逐字复用该角色的 `appearance`。
+5. 默认目标是完整讲清故事，而不是机械压缩。未指定时，短篇通常输出 8-16 帧；更长文本可按 segment 拆分后累计更多帧。
+6. 能并行就并行：分析长篇时按 segment 并行，生成阶段按 batch 并行，验证和重试串行。
+7. 任一子步骤返回非 JSON 时，先重跑该子步骤一次，并再次强调“只输出 JSON”。
 
-## Step 1: 输入验证与长篇分段
+## 输出契约
 
-### 1.1 预检查
+标准 JSON 输出结构：
 
-```python
-word_count = len(novel_text)
-
-IF word_count > 16000:
-    WARN("小说过长，建议精简或分册处理")
-    
-IF word_count > 8000:
-    # 启用分段模式
-    segments = chunk_novel(novel_text, max_size=8000)
-ELSE:
-    segments = [novel_text]
-```
-
-### 1.2 分段算法 (Chunking)
-
-```python
-def chunk_novel(text, max_size=8000):
-    """
-    按场景切换点分割长篇小说
-    优先在以下位置切割：
-    1. 章节标题 (# / ## / ***)
-    2. 场景分隔符 (空行 + 时间/地点变化)
-    3. 段落边界
-    """
-    chunks = []
-    current_chunk = ""
-    
-    for paragraph in text.split("\n\n"):
-        if len(current_chunk) + len(paragraph) > max_size:
-            # 寻找最佳切割点
-            if is_scene_break(paragraph):
-                chunks.append(current_chunk)
-                current_chunk = paragraph
-            else:
-                # 强制切割，但保留上下文重叠
-                overlap = get_last_200_chars(current_chunk)
-                chunks.append(current_chunk)
-                current_chunk = overlap + "\n\n" + paragraph
-        else:
-            current_chunk += "\n\n" + paragraph
-    
-    if current_chunk:
-        chunks.append(current_chunk)
-    
-    return chunks
+```json
+{
+  "metadata": {
+    "title": "标题",
+    "author": "作者或佚名",
+    "style": "中国传统连环画（黑白线描）"
+  },
+  "characters": {
+    "角色名": "完整外观描述"
+  },
+  "frames": [
+    {
+      "frame_number": 1,
+      "plot_marker": "开场",
+      "scene": {
+        "time": "白天",
+        "location": "地点",
+        "atmosphere": "氛围"
+      },
+      "characters": [
+        {
+          "name": "角色名",
+          "appearance": "与角色卡完全一致",
+          "action": "该帧动作"
+        }
+      ],
+      "shot_type": "全景",
+      "narration": "50-100 字左右的旁白",
+      "dialogue": [
+        {
+          "speaker": "角色名",
+          "text": "单气泡不超过 30 字"
+        }
+      ],
+      "image_prompt": "包含 [1-场景] 到 [6-风格] 的完整提示词"
+    }
+  ]
+}
 ```
 
-### 1.3 分段元数据
+如用户要求写文件，默认输出：
 
-对每个segment记录：
+- `{标题}_连环画脚本.json`
+- `{标题}_连环画脚本.md`
+
+## 选择工作模式
+
+### 单次生成模式
+
+满足以下任一条件时优先使用：
+
+- 文本较短，约 `<= 3000` 汉字
+- 用户只要一个快速初稿
+- 目标帧数不超过 `8`
+
+流程：
+
+1. 先运行 `analyzer.md` 得到角色卡和 `frame_plan`
+2. 再运行 `generator.md` 一次性生成全部帧
+3. 用 `validator.md` 验证
+4. 有问题时用 `retry_generator.md` 修复问题帧
+
+### 编排模式
+
+满足以下任一条件时使用：
+
+- 文本较长，约 `> 3000` 汉字
+- 用户明确要稳定质量
+- 需要并行提速
+- 需要长篇分段
+
+流程：
+
+1. 预处理和分段
+2. `analyzer.md` 先产出角色卡和分帧方案
+3. `batch_generator.md` 按 batch 并行生成
+4. `validator.md` 统一验证
+5. `retry_generator.md` 只修复失败帧
+6. 聚合最终结果
+
+## 1. 预处理与分段
+
+### 文本预处理
+
+- 规范换行和空白，保留段落边界。
+- 用字符数而不是 token 粗估规模：`len(novel_text)`。
+- 如果文本超过 `24000` 汉字，先提醒用户质量和耗时都会下降，建议按章节处理；若用户仍要求整篇处理，可以继续。
+
+### 分段规则
+
+- `<= 8000` 汉字：单段处理
+- `8001-16000` 汉字：拆成 2 段
+- `16001-24000` 汉字：拆成 3 段
+- 优先在章节标题、明显场景切换、段落边界切开
+- 每段保留约 `150-250` 汉字 overlap，避免上下文断裂
+
+对每个 segment 记录：
+
 ```json
 {
   "segment_index": 1,
   "total_segments": 3,
   "char_start": 0,
   "char_end": 7800,
-  "is_continuation": false,
-  "shared_characters": []  // 跨段共享的角色
+  "is_continuation": false
 }
 ```
 
----
+## 2. 分析阶段
 
-## Step 2: 调用 Analyzer Agent
+### 调用方式
 
-对每个 segment 调用分析：
+对每个 segment 读取 `prompts/analyzer.md`，替换：
 
-```
-Task(
-  description="分析小说段落 {segment_index}/{total_segments}",
-  subagent_type="general",
-  prompt=read_file("prompts/analyzer.md").replace("{{NOVEL_TEXT}}", segment)
-)
-```
+- `{{NOVEL_TEXT}}`
+- `{{FRAME_COUNT_RULE}}`
 
-**角色合并**：如果有多个segment，合并所有角色卡，确保一致性：
+`{{FRAME_COUNT_RULE}}` 的推荐写法：
 
-```python
-merged_characters = {}
-for result in analyzer_results:
-    for name, desc in result["characters"].items():
-        if name not in merged_characters:
-            merged_characters[name] = desc
-        else:
-            # 保留更详细的描述
-            if len(desc) > len(merged_characters[name]):
-                merged_characters[name] = desc
-```
+- 单段短篇：`目标总帧数 8-16 帧。`
+- 长篇 segment：`这是长篇中的一个 segment，请为本段规划 4-8 帧，并保证剧情完整衔接。`
+- 用户指定帧数时：`用户指定总帧数为 12，请据此规划。`
 
----
+### 角色卡合并
 
-## Step 3: 并行帧生成 (Batch Generators)
+多个 segment 的角色卡合并时，按以下顺序处理：
 
-### 3.1 批量划分策略
+1. 同名角色优先保留更完整、更具体的描述
+2. 一旦最终角色卡确定，后续生成阶段不得再扩写或改写
+3. 发现明显冲突时，以最早出现且最符合原文的描述为准，并在最终说明中提示用户
 
-```python
-def create_batches(frame_plan, batch_size=4):
-    """
-    将帧分成多个批次，每批4帧
-    """
-    batches = []
-    for i in range(0, len(frame_plan), batch_size):
-        batch = {
-            "batch_index": i // batch_size + 1,
-            "frames": frame_plan[i:i+batch_size],
-            "frame_numbers": list(range(i+1, min(i+batch_size+1, len(frame_plan)+1)))
-        }
-        batches.append(batch)
-    return batches
-```
+## 3. 生成阶段
 
-### 3.2 并行调用
+### 单次生成模式
 
-**关键**：使用多个 Task 同时调用，实现并行：
+读取 `prompts/generator.md`，替换：
 
-```
-# 在同一个消息中发送多个 Task 调用
-Task(
-  description="生成帧1-4",
-  subagent_type="general",
-  prompt=batch_generator_prompt.format(batch=batches[0])
-)
+- `{{CHARACTERS_JSON}}`
+- `{{FRAME_PLAN_JSON}}`
+- `{{NOVEL_TEXT}}`
 
-Task(
-  description="生成帧5-8",
-  subagent_type="general",
-  prompt=batch_generator_prompt.format(batch=batches[1])
-)
+生成完成后直接进入验证。
 
-Task(
-  description="生成帧9-12",
-  subagent_type="general",
-  prompt=batch_generator_prompt.format(batch=batches[2])
-)
-# ... 同时发送，并行执行
-```
+### 编排模式
 
-### 3.3 Batch Generator Prompt
+先把 `frame_plan` 按 `4` 帧一批切分；仅当总帧数明显更多时才把 batch_size 提到 `6`。
 
-见 `prompts/batch_generator.md`
-
----
-
-## Step 4: Validator Agent
-
-### 4.1 验证调用
-
-```
-Task(
-  description="验证生成结果",
-  subagent_type="general",
-  prompt=read_file("prompts/validator.md").replace("{{FRAMES_JSON}}", all_frames)
-)
-```
-
-### 4.2 验证规则
-
-| 检查项 | 约束 | 错误级别 |
-|-------|------|---------|
-| 帧数 | 8-16帧 | ERROR |
-| 旁白字数 | 50-100字/帧 | WARNING |
-| 对话字数 | ≤30字/气泡 | WARNING |
-| 角色一致性 | 外观描述完全匹配角色卡 | ERROR |
-| 镜头多样性 | 至少3种不同镜头 | WARNING |
-| 提示词结构 | 必须包含6个部分 | ERROR |
-| 风格标签 | 含「中国传统连环画」「黑白线描」 | ERROR |
-| JSON有效性 | 可解析 | ERROR |
-
-### 4.3 验证输出格式
+对每个 batch 构造：
 
 ```json
 {
-  "is_valid": false,
-  "error_count": 2,
-  "warning_count": 3,
-  "issues": [
+  "batch_index": 1,
+  "total_batches": 3,
+  "frame_start": 1,
+  "frame_end": 4
+}
+```
+
+再读取 `prompts/batch_generator.md`，替换：
+
+- `{{CHARACTERS_JSON}}`
+- `{{BATCH_INDEX}}`
+- `{{TOTAL_BATCHES}}`
+- `{{FRAME_START}}`
+- `{{FRAME_END}}`
+- `{{BATCH_FRAMES_JSON}}`
+- `{{RELEVANT_TEXT}}`
+
+### `RELEVANT_TEXT` 组装规则
+
+- 以该 batch 第一帧的 `text_start` 和最后一帧的 `text_end` 为锚点
+- 从原文截取对应区间
+- 前后各补 1 个自然段作为缓冲
+- 如果无法精确定位，就回退到该 batch 对应 segment 的完整文本
+
+### 并行规则
+
+- 为每个 batch 启动独立子代理并行生成
+- 不要等一个 batch 完成后再启动下一个
+- 所有 batch 结束后，按 `frame_number` 排序聚合
+
+## 4. 验证阶段
+
+读取 `prompts/validator.md`，替换：
+
+- `{{CHARACTERS_JSON}}`
+- `{{FRAMES_JSON}}`
+- `{{FRAME_COUNT_RULE}}`
+
+推荐把 `{{FRAME_COUNT_RULE}}` 替换成明确句子，例如：
+
+- `本次结果应为 12 帧。`
+- `这是单个 segment 的结果，应为 5 帧。`
+
+验证时重点检查：
+
+- 帧数是否符合当前任务要求
+- `characters[].appearance` 是否与角色卡逐字一致
+- `dialogue` 是否为对象数组，且每个对象都含 `speaker` 和 `text`
+- `image_prompt` 是否含 `[1-场景]` 到 `[6-风格]`
+- 是否包含 `中国传统连环画` 与 `黑白线描`
+
+## 5. 增量重试
+
+若验证返回 `frames_to_retry`，最多重试 `3` 轮。
+
+每轮读取 `prompts/retry_generator.md`，替换：
+
+- `{{CHARACTERS_JSON}}`
+- `{{FRAMES_TO_FIX}}`
+- `{{ISSUES_JSON}}`
+- `{{ORIGINAL_FRAMES_JSON}}`
+
+要求重试结果继续返回统一 schema：
+
+```json
+{
+  "retry_count": 1,
+  "frames": [
     {
-      "frame_number": 5,
-      "field": "narration",
-      "level": "WARNING",
-      "message": "旁白字数102字，超过100字上限",
-      "suggestion": "精简旁白，删除次要细节"
-    },
-    {
-      "frame_number": 8,
-      "field": "characters[0].appearance",
-      "level": "ERROR",
-      "message": "角色外观描述与角色卡不一致",
-      "expected": "六旬退休老者，身形微胖...",
-      "actual": "老年男子，穿着便装..."
+      "frame_number": 8
     }
-  ],
-  "frames_to_retry": [5, 8]
+  ]
 }
 ```
 
----
+然后：
 
-## Step 5: 增量重试 (Retry Loop)
+1. 仅用新帧覆盖对应 `frame_number`
+2. 保留未出错帧
+3. 重新运行验证
 
-### 5.1 重试逻辑
+若 3 轮后仍有 `ERROR`，交付当前最佳结果并明确标注残留问题。
 
-```python
-MAX_RETRIES = 3
-retry_count = 0
+## 6. 聚合与交付
 
-while validation_result["frames_to_retry"] and retry_count < MAX_RETRIES:
-    retry_count += 1
-    
-    # 只重新生成问题帧
-    frames_to_fix = validation_result["frames_to_retry"]
-    
-    Task(
-      description=f"重新生成问题帧 {frames_to_fix}",
-      subagent_type="general",
-      prompt=retry_generator_prompt.format(
-        frames=frames_to_fix,
-        issues=validation_result["issues"],
-        characters=merged_characters
-      )
-    )
-    
-    # 替换原有帧
-    for new_frame in retry_result["frames"]:
-        all_frames[new_frame["frame_number"] - 1] = new_frame
-    
-    # 重新验证
-    validation_result = validate(all_frames)
+### 聚合规则
 
-if validation_result["error_count"] > 0:
-    WARN("仍有未解决的错误，请人工检查")
-```
+- 多个 segment 的帧合并后重新编号
+- `metadata.style` 固定写成 `中国传统连环画（黑白线描）`
+- 最终 `characters` 只保留合并后的角色卡
 
-### 5.2 Retry Generator Prompt
+### Markdown 渲染
 
-见 `prompts/retry_generator.md`
+若用户要 `.md` 文件，按以下顺序渲染：
 
----
+1. 标题与元数据
+2. 角色卡
+3. 每帧的小节
+4. `narration`
+5. `dialogue`
+6. `image_prompt`
 
-## Step 6: 聚合输出
+## 常见故障
 
-### 6.1 合并多段结果
+| 问题 | 处理 |
+|---|---|
+| 分析返回非 JSON | 重跑分析一次，强调“只输出 JSON” |
+| 生成批次遗漏字段 | 重跑对应 batch，不要整批回滚全部结果 |
+| 角色外观漂移 | 以最终角色卡强制覆盖并重试问题帧 |
+| 对话结构错误 | 统一改成 `[{\"speaker\": \"...\", \"text\": \"...\"}]` |
+| 长篇上下文断裂 | 增加 overlap 或让 `RELEVANT_TEXT` 回退为完整 segment |
 
-```python
-final_output = {
-    "metadata": {
-        "title": title,
-        "author": author,
-        "total_frames": sum(len(r["frames"]) for r in all_results),
-        "segments": len(segments) if len(segments) > 1 else None,
-        "style": "中国传统连环画（黑白线描）"
-    },
-    "characters": merged_characters,
-    "frames": []  # 按顺序合并所有帧
-}
+## 最小执行顺序
 
-frame_number = 1
-for segment_result in all_results:
-    for frame in segment_result["frames"]:
-        frame["frame_number"] = frame_number  # 重新编号
-        final_output["frames"].append(frame)
-        frame_number += 1
-```
-
-### 6.2 输出文件
-
-```
-{标题}_连环画脚本.md
-{标题}_连环画脚本.json
-```
-
----
-
-## 快速参考
-
-### 批量大小建议
-
-| 总帧数 | 批量大小 | 批次数 |
-|-------|---------|--------|
-| 8-12帧 | 4帧/批 | 2-3批 |
-| 13-16帧 | 4帧/批 | 4批 |
-| 17-24帧 | 6帧/批 | 3-4批 |
-
-### 分段阈值
-
-| 字数 | 处理方式 |
-|-----|---------|
-| ≤8000 | 单段处理 |
-| 8001-16000 | 2段 |
-| 16001-24000 | 3段 |
-| >24000 | 警告用户分册 |
-
-### 重试策略
-
-| 错误类型 | 重试方式 |
-|---------|---------|
-| 旁白过长/过短 | 只重新生成narration字段 |
-| 角色不一致 | 重新生成整帧，强调角色卡 |
-| 结构缺失 | 重新生成image_prompt |
-| JSON错误 | 重新生成整批 |
-
----
-
-## 错误处理
-
-| 错误 | 处理 |
-|-----|------|
-| Analyzer返回非JSON | 重试1次，强调输出格式 |
-| 批量生成超时 | 减小batch_size重试 |
-| 验证持续失败 | 输出当前结果+警告 |
-| 分段上下文丢失 | 增加overlap区域 |
+1. 读 `analyzer.md`
+2. 决定单次生成还是编排模式
+3. 读对应生成模板
+4. 读 `validator.md`
+5. 必要时再读 `retry_generator.md`

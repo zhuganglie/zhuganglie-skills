@@ -1,0 +1,4 @@
+interface:
+  display_name: "连环画分镜脚本"
+  short_description: "把小说拆成中国传统连环画风格分镜、角色卡与图像提示词"
+  default_prompt: "Use $xrs to convert a novel or story excerpt into a Chinese traditional lianhuanhua storyboard with character cards, structured frames, and image prompts."
