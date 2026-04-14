@@ -44,3 +44,5 @@ Use a short note when needed:
 - High confidence: chronology and causal interpretation are both well established.
 - Medium confidence: chronology is stable, but interpretation is contested.
 - Low confidence: the evidence base is thin, definitions vary, or recent events may still reshape the story.
+
+Add at least a brief boundary note whenever you had to assume the geography or when the phase breaks, inflection points, or architect choices are interpretive rather than uniquely correct.

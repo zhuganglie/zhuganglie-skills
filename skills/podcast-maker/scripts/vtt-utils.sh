@@ -3,95 +3,6 @@
 # vtt-utils.sh - Shared helpers for robust WebVTT parsing
 #
 
-trim_whitespace() {
-    local value="$1"
-
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
-
-    printf '%s\n' "$value"
-}
-
-# Convert WebVTT timestamp (HH:MM:SS.mmm or MM:SS.mmm) to seconds.
-timestamp_to_seconds() {
-    local ts
-    ts=$(trim_whitespace "$1")
-    ts="${ts//,/.}"
-
-    local hours="0"
-    local minutes="0"
-    local seconds=""
-
-    if [[ "$ts" =~ ^([0-9]+):([0-9]{2}):([0-9]{2}(\.[0-9]+)?)$ ]]; then
-        hours="${BASH_REMATCH[1]}"
-        minutes="${BASH_REMATCH[2]}"
-        seconds="${BASH_REMATCH[3]}"
-    elif [[ "$ts" =~ ^([0-9]+):([0-9]{2}(\.[0-9]+)?)$ ]]; then
-        minutes="${BASH_REMATCH[1]}"
-        seconds="${BASH_REMATCH[2]}"
-    else
-        return 1
-    fi
-
-    hours=$((10#$hours))
-    minutes=$((10#$minutes))
-
-    awk "BEGIN {printf \"%.3f\", $hours * 3600 + $minutes * 60 + $seconds}"
-}
-
-# Extract start and end timestamps from a WebVTT cue timing line.
-extract_vtt_timestamps() {
-    local line="$1"
-
-    if [[ "$line" != *"-->"* ]]; then
-        return 1
-    fi
-
-    local start_part rest end_part
-    start_part=$(trim_whitespace "${line%%-->*}")
-    rest=$(trim_whitespace "${line#*-->}")
-    read -r end_part _ <<< "$rest"
-
-    if [[ -z "$start_part" || -z "$end_part" ]]; then
-        return 1
-    fi
-
-    printf '%s\t%s\n' "$start_part" "$end_part"
-}
-
-append_vtt_cue() {
-    local cues_json="$1"
-    local cue_index="$2"
-    local start_formatted="$3"
-    local end_formatted="$4"
-    local text="$5"
-
-    local start_seconds end_seconds
-    if ! start_seconds=$(timestamp_to_seconds "$start_formatted"); then
-        return 1
-    fi
-
-    if ! end_seconds=$(timestamp_to_seconds "$end_formatted"); then
-        return 1
-    fi
-
-    printf '%s\n' "$cues_json" | jq -c \
-        --argjson idx "$cue_index" \
-        --arg start_sec "$start_seconds" \
-        --arg end_sec "$end_seconds" \
-        --arg start_fmt "$start_formatted" \
-        --arg end_fmt "$end_formatted" \
-        --arg text "$text" \
-        '. + [{
-            "index": $idx,
-            "start_seconds": ($start_sec | tonumber),
-            "end_seconds": ($end_sec | tonumber),
-            "start_formatted": $start_fmt,
-            "end_formatted": $end_fmt,
-            "text": $text
-        }]'
-}
-
 # Parse a WebVTT file into a JSON array of cues.
 parse_vtt_cues_array() {
     local vtt_file="$1"
@@ -100,69 +11,91 @@ parse_vtt_cues_array() {
         return 1
     fi
 
-    local cues_json="[]"
-    local cue_index=0
-    local current_start=""
-    local current_end=""
-    local current_text=""
-    local in_cue=false
-    local skip_block=false
-
-    while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
-        local line trimmed
-        line="${raw_line//$'\r'/}"
-        trimmed=$(trim_whitespace "$line")
-
-        if [[ "$skip_block" == true ]]; then
-            if [[ -z "$trimmed" ]]; then
-                skip_block=false
-            fi
-            continue
-        fi
-
-        if [[ -z "$trimmed" ]]; then
-            continue
-        fi
-
-        if [[ "$trimmed" == "WEBVTT"* ]]; then
-            continue
-        fi
-
-        if [[ "$trimmed" == "NOTE"* ]] || [[ "$trimmed" == "STYLE"* ]] || [[ "$trimmed" == "REGION"* ]]; then
-            skip_block=true
-            continue
-        fi
-
-        if [[ "$trimmed" == *"-->"* ]]; then
-            if [[ "$in_cue" == true ]] && [[ -n "$current_start" ]]; then
-                if ! cues_json=$(append_vtt_cue "$cues_json" "$cue_index" "$current_start" "$current_end" "$current_text"); then
-                    return 1
-                fi
-            fi
-
-            local parsed_timestamps
-            if ! parsed_timestamps=$(extract_vtt_timestamps "$trimmed"); then
-                return 1
-            fi
-
-            cue_index=$((cue_index + 1))
-            current_start="${parsed_timestamps%%$'\t'*}"
-            current_end="${parsed_timestamps#*$'\t'}"
-            current_text=""
-            in_cue=true
-            continue
-        fi
-
-        if [[ "$in_cue" == true ]]; then
-            current_text="${current_text:+$current_text }$trimmed"
-        fi
-    done < "$vtt_file"
-
-    if [[ "$in_cue" == true ]] && [[ -n "$current_start" ]]; then
-        if ! cues_json=$(append_vtt_cue "$cues_json" "$cue_index" "$current_start" "$current_end" "$current_text"); then
-            return 1
-        fi
-    fi
-
-    printf '%s\n' "$cues_json"
+    # Read VTT line by line and construct a JSON stream of objects using awk,
+    # then slurp them into a single JSON array using jq -s.
+    awk '
+    function trim(s) {
+        sub(/^[ \t\r\n]+/, "", s)
+        sub(/[ \t\r\n]+$/, "", s)
+        return s
+    }
+    function ts2sec(ts) {
+        gsub(/,/, ".", ts)
+        n = split(ts, parts, ":")
+        if (n == 3) {
+            return parts[1] * 3600 + parts[2] * 60 + parts[3]
+        } else if (n == 2) {
+            return parts[1] * 60 + parts[2]
+        }
+        return 0
+    }
+    function escape_json(str) {
+        gsub(/\\/, "\\\\", str)
+        gsub(/"/, "\\\"", str)
+        gsub(/\n/, "\\n", str)
+        gsub(/\r/, "", str)
+        gsub(/\t/, "\\t", str)
+        return str
+    }
+    BEGIN {
+        cue_index = 1
+        has_cue = 0
+    }
+    {
+        line = $0
+        sub(/\r$/, "", line)
+        trimmed = trim(line)
+        
+        if (skip_block) {
+            if (trimmed == "") skip_block = 0
+            next
+        }
+        
+        if (trimmed == "") {
+            in_text = 0
+            next
+        }
+        
+        if (trimmed ~ /^WEBVTT/) next
+        
+        if (trimmed ~ /^NOTE/ || trimmed ~ /^STYLE/ || trimmed ~ /^REGION/) {
+            skip_block = 1
+            next
+        }
+        
+        if (trimmed ~ /-->/) {
+            if (has_cue) {
+                # Print previous cue as a JSON object
+                printf "{\"index\": %d, \"start_seconds\": %.3f, \"end_seconds\": %.3f, \"start_formatted\": \"%s\", \"end_formatted\": \"%s\", \"text\": \"%s\"}\n", cue_index, start_sec, end_sec, start_fmt, end_fmt, escape_json(text)
+                cue_index++
+            }
+            
+            # Split the timestamp line
+            # Format: 00:00:01.000 --> 00:00:02.000 align:start size:15%
+            idx = index(trimmed, "-->")
+            start_fmt = trim(substr(trimmed, 1, idx - 1))
+            
+            rest = trim(substr(trimmed, idx + 3))
+            split(rest, end_parts, " ")
+            end_fmt = trim(end_parts[1])
+            
+            start_sec = ts2sec(start_fmt)
+            end_sec = ts2sec(end_fmt)
+            
+            text = ""
+            has_cue = 1
+            in_text = 1
+            next
+        }
+        
+        if (in_text) {
+            if (text != "") text = text " "
+            text = text trimmed
+        }
+    }
+    END {
+        if (has_cue) {
+            printf "{\"index\": %d, \"start_seconds\": %.3f, \"end_seconds\": %.3f, \"start_formatted\": \"%s\", \"end_formatted\": \"%s\", \"text\": \"%s\"}\n", cue_index, start_sec, end_sec, start_fmt, end_fmt, escape_json(text)
+        }
+    }' "$vtt_file" | jq -s .
 }

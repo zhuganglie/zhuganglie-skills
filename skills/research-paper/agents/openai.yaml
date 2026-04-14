@@ -1,4 +1,0 @@
-interface:
-  display_name: "Political Science Research Paper"
-  short_description: "Design, draft, and review analytic political science papers"
-  default_prompt: "Use $research-paper to design, draft, and review a political science paper from a historical puzzle."

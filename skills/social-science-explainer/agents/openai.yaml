@@ -1,0 +1,4 @@
+interface:
+  display_name: "Social Science Explainer"
+  short_description: "Explain social science books and papers for general readers without losing the research logic"
+  default_prompt: "Use $social-science-explainer to turn a social science book or paper into a public-facing Chinese essay that explains the research question, method, findings, theory, contribution, limitations, and the excitement of inquiry."
